@@ -27,4 +27,4 @@ It demonstrates a basic heater control system using the **DS18B20 temperature se
 ---
 
 ## 📷 Wiring Diagram (Wokwi Simulation)
-
+- https://wokwi.com/projects/438087336845423617
