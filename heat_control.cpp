@@ -2,30 +2,33 @@
 #include <DallasTemperature.h>
 
 // Pin assignments
-#define ONE_WIRE_BUS 2     // DS18B20 data pin connected to pin 2
-#define HEATER_PIN  13     // Simulated heater (LED on pin 13)
+#define ONE_WIRE_BUS 2         // DS18B20 data pin connected to pin 2
+#define HEATER_PIN 12          // Heater simulation LED
+#define STATUS_LED_PIN 13      // Status blinking LED
 
 // Temperature thresholds
-#define TEMP_ON_THRESHOLD   25.0
-#define TEMP_OFF_THRESHOLD  30.0
-#define TEMP_OVERHEAT       40.0
+#define IDLE_TEMP 5
+#define TEMP_ON_THRESHOLD 25.0
+#define TEMP_OFF_THRESHOLD 30.0
+#define TEMP_OVERHEAT 40.0
 
 // States
 enum HeaterState { IDLE, HEATING, STABILIZING, TARGET_REACHED, OVERHEAT };
 HeaterState state = IDLE;
 
-// OneWire and temperature sensor setup
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-// Blinking logic
+// LED blinking logic
 unsigned long lastBlinkTime = 0;
 bool ledState = LOW;
 
 void setup() {
   Serial.begin(9600);
   pinMode(HEATER_PIN, OUTPUT);
+  pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(HEATER_PIN, LOW);
+  digitalWrite(STATUS_LED_PIN, LOW);
   sensors.begin();
   Serial.println("Heater Control System Initialized");
 }
@@ -34,7 +37,6 @@ void loop() {
   static unsigned long lastSensorRead = 0;
   unsigned long currentMillis = millis();
 
-  // Read temperature every 2000 ms
   if (currentMillis - lastSensorRead >= 2000) {
     lastSensorRead = currentMillis;
 
@@ -45,67 +47,104 @@ void loop() {
     logStatus(temperature);
   }
 
-  handleLED();  // Call continuously for responsive blinking
+  handleStatusLED();  // Only blinks STATUS_LED_PIN
 }
 
-
 void updateState(float temp) {
+  // Overheat protection
+  if (temp >= TEMP_OVERHEAT) {
+    digitalWrite(HEATER_PIN, LOW);  // Heater OFF
+    state = OVERHEAT;
+    return;
+  }
+
   switch (state) {
     case IDLE:
-      digitalWrite(HEATER_PIN, LOW);
-      if (temp < TEMP_ON_THRESHOLD) {
-        digitalWrite(HEATER_PIN, HIGH);
+      digitalWrite(HEATER_PIN, LOW);  // Heater OFF
+      if (temp > IDLE_TEMP && temp <= TEMP_ON_THRESHOLD) {
+        digitalWrite(HEATER_PIN, HIGH);  // Heater ON
         state = HEATING;
+      }else if (temp > TEMP_ON_THRESHOLD && temp <= TEMP_OFF_THRESHOLD) {
+        digitalWrite(HEATER_PIN, HIGH);  // Heater ON
+        state = STABILIZING;
+      }else if (temp > TEMP_OFF_THRESHOLD && temp < TEMP_OVERHEAT) {
+        digitalWrite(HEATER_PIN, HIGH);  // Heater ON
+        state = TARGET_REACHED;
+      }else if( temp > TEMP_OVERHEAT) {
+        digitalWrite(HEATER_PIN, LOW);
+        state = OVERHEAT;
       }
       break;
 
     case HEATING:
-      if (temp >= TEMP_ON_THRESHOLD) {
-        digitalWrite(HEATER_PIN, LOW);
+      if (temp <= IDLE_TEMP) {
+        digitalWrite(HEATER_PIN, LOW);  // Heater OFF
+        state = IDLE;
+      } else if (temp >= TEMP_ON_THRESHOLD && temp <= TEMP_OFF_THRESHOLD) {
+        digitalWrite(HEATER_PIN, HIGH);  // Stay ON
         state = STABILIZING;
-      }
+      } else if (temp >= TEMP_OFF_THRESHOLD ) {
+        digitalWrite(HEATER_PIN, HIGH);  // Stay ON
+        state = TARGET_REACHED;
+       } //else if (temp > TEMP_OVERHEAT) {
+      //   digitalWrite(HEATER_PIN, LOW);  // Stay ON
+      //   state = OVERHEAT;
+      // }
       break;
 
     case STABILIZING:
+      digitalWrite(HEATER_PIN, HIGH);  // Heater ON
       if (temp < TEMP_ON_THRESHOLD) {
-        digitalWrite(HEATER_PIN, HIGH);
         state = HEATING;
-      } else if (temp >= TEMP_OFF_THRESHOLD - 1) {
+      } else if (temp > TEMP_OFF_THRESHOLD) {
         state = TARGET_REACHED;
       }
       break;
 
     case TARGET_REACHED:
-      if (temp < TEMP_ON_THRESHOLD) {
-        digitalWrite(HEATER_PIN, HIGH);
+      digitalWrite(HEATER_PIN, HIGH);  // Heater ON
+      if(temp < IDLE_TEMP){
+        state = IDLE;
+      }else if (temp < TEMP_ON_THRESHOLD){
         state = HEATING;
+      }else if (temp <= TEMP_OFF_THRESHOLD) {
+        state = STABILIZING;
+      }else if(temp > TEMP_OVERHEAT){
+        state = OVERHEAT;
       }
       break;
 
     case OVERHEAT:
-      digitalWrite(HEATER_PIN, LOW);
-      if (temp <= TEMP_OFF_THRESHOLD) {
-        state = STABILIZING;
+      digitalWrite(HEATER_PIN, LOW);  // Heater OFF
+      if (temp < TEMP_OVERHEAT) {
+        // Resume heating logic
+        if (temp < IDLE_TEMP){
+          digitalWrite(HEATER_PIN, LOW);
+          state = IDLE;
+        }else if (temp < TEMP_ON_THRESHOLD) {
+          digitalWrite(HEATER_PIN, HIGH);
+          state = HEATING;
+        } else if (temp <= TEMP_OFF_THRESHOLD) {
+          digitalWrite(HEATER_PIN, HIGH);
+          state = STABILIZING;
+        } else {
+          digitalWrite(HEATER_PIN, HIGH);
+          state = TARGET_REACHED;
+        }
       }
       break;
   }
-
-  // Overheat protection (highest priority)
-  if (temp > TEMP_OVERHEAT) {
-    digitalWrite(HEATER_PIN, LOW);
-    state = OVERHEAT;
-  }
 }
 
-void handleLED() {
+
+void handleStatusLED() {
   static unsigned long previousMillis = 0;
   static bool ledStateLocal = LOW;
-
   unsigned long currentMillis = millis();
   unsigned long onTime, offTime;
 
-  // Set blink timing based on state
   switch (state) {
+    case HEATING:
     case STABILIZING:
     case TARGET_REACHED:
       onTime = 500;
@@ -116,24 +155,21 @@ void handleLED() {
       offTime = 250;
       break;
     default:
-      digitalWrite(HEATER_PIN, LOW);  // LED OFF in other states
+      digitalWrite(STATUS_LED_PIN, LOW);  // OFF in other states
       ledStateLocal = LOW;
       return;
   }
 
-  // Blinking logic
   if (ledStateLocal == HIGH && (currentMillis - previousMillis >= onTime)) {
-    digitalWrite(HEATER_PIN, LOW);
+    digitalWrite(STATUS_LED_PIN, LOW);
     ledStateLocal = LOW;
     previousMillis = currentMillis;
   } else if (ledStateLocal == LOW && (currentMillis - previousMillis >= offTime)) {
-    digitalWrite(HEATER_PIN, HIGH);
+    digitalWrite(STATUS_LED_PIN, HIGH);
     ledStateLocal = HIGH;
     previousMillis = currentMillis;
   }
 }
-
-
 
 void logStatus(float temp) {
   Serial.print("Temperature: ");
